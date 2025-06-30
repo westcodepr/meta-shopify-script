@@ -1,12 +1,15 @@
 {
-  "name": "cloudrun-script",
+  "name": "meta-shopify-script",
   "version": "1.0.0",
-  "description": "Script para Cloud Run desde GitHub",
+  "description": "Script de extracción para Meta Ads y Shopify",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
   },
   "dependencies": {
-    "express": "^4.18.2"
+    "axios": "^1.6.7",
+    "express": "^4.18.2",
+    "googleapis": "^133.0.0",
+    "dotenv": "^16.3.1"
   }
 }
