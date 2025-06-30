@@ -4,13 +4,11 @@ FROM node:18
 # Crear directorio de trabajo
 WORKDIR /usr/src/app
 
-# Copiar archivos e instalar dependencias
+# Copiar archivos
 COPY package*.json ./
 RUN npm install
 COPY . .
 
-# Exponer el puerto esperado por Cloud Run
+# Exponer puerto 8080 y ejecutar app
 EXPOSE 8080
-
-# Comando para correr la aplicación
-CMD [ "npm", "start" ]
+CMD ["npm", "start"]
