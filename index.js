@@ -166,12 +166,9 @@ async function run() {
   }
 }
 
-run();
-
-
 app.get('/', async (req, res) => {
   try {
-    await main(); // <- tu función principal
+    await run(); // llamada correcta a tu función principal
     res.send('✅ El script se ejecutó correctamente desde Cloud Run.');
   } catch (err) {
     console.error(err);
