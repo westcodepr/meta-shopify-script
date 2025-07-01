@@ -6,6 +6,14 @@ require('dotenv').config();
 const { google } = require('googleapis');
 const fetch = require('node-fetch');
 
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function randomDelay() {
+  return Math.floor(Math.random() * (10000 - 5000 + 1)) + 5000; // entre 5 y 10 segundos
+}
+
 async function authorize() {
   const auth = new google.auth.GoogleAuth({
     keyFile: process.env.GOOGLE_APPLICATION_CREDENTIALS,
@@ -161,6 +169,11 @@ async function run() {
         }
       }
     }
+
+    // Espera entre 5 y 10 segundos antes de pasar a la próxima columna
+    const delay = randomDelay();
+    console.log(`⏳ Esperando ${delay / 1000} segundos antes de continuar con la próxima columna...`);
+    await sleep(delay);
   }
 
   console.log("✅ Script ejecutado correctamente.");
