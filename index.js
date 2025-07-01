@@ -6,7 +6,6 @@ require('dotenv').config();
 const { google } = require('googleapis');
 const fetch = require('node-fetch');
 
-// Autenticación con Google Sheets API
 async function authorize() {
   const auth = new google.auth.GoogleAuth({
     keyFile: process.env.GOOGLE_APPLICATION_CREDENTIALS,
@@ -15,27 +14,25 @@ async function authorize() {
   return await auth.getClient();
 }
 
-// Obtener rango de fechas por periodo
 function getDateRange(period) {
   const tzOffset = -4 * 60; // UTC-4
-  const today = new Date(new Date().getTime() + tzOffset * 60000);
-  let since, until = today.toISOString().split('T')[0];
+  const now = new Date(new Date().getTime() + tzOffset * 60000);
+  let since = "", until = now.toISOString().split('T')[0];
 
   if (period === 'week') {
-    const day = today.getUTCDay();
-    const monday = new Date(today);
-    monday.setUTCDate(today.getUTCDate() - (day === 0 ? 6 : day - 1));
+    const day = now.getDay();
+    const monday = new Date(now);
+    monday.setDate(now.getDate() - (day === 0 ? 6 : day - 1));
     since = monday.toISOString().split('T')[0];
   } else if (period === 'month') {
-    since = `${today.getUTCFullYear()}-${String(today.getUTCMonth() + 1).padStart(2, '0')}-01`;
-  } else {
-    since = `${today.getUTCFullYear()}-01-01`;
+    since = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-01`;
+  } else if (period === 'year') {
+    since = `${now.getFullYear()}-01-01`;
   }
 
   return { since, until };
 }
 
-// Función principal
 async function run() {
   const client = await authorize();
   const sheets = google.sheets({ version: 'v4', auth: client });
@@ -169,7 +166,6 @@ async function run() {
   console.log("✅ Script ejecutado correctamente.");
 }
 
-// Endpoint HTTP para Cloud Run
 app.get('/', async (req, res) => {
   try {
     await run();
