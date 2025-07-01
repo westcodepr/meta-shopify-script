@@ -5,6 +5,7 @@ const port = process.env.PORT || 8080;
 require('dotenv').config();
 const { google } = require('googleapis');
 const fetch = require('node-fetch');
+const pLimit = require('p-limit'); // ✅ Nuevo: controlar concurrencia
 
 async function authorize() {
   const auth = new google.auth.GoogleAuth({
@@ -15,9 +16,9 @@ async function authorize() {
 }
 
 function getDateRange(period) {
-  const tzOffset = -4 * 60; // UTC-4
+  const tzOffset = -4 * 60;
   const now = new Date(new Date().getTime() + tzOffset * 60000);
-  let since = "", until = now.toISOString().split('T')[0];
+  let since = '', until = now.toISOString().split('T')[0];
 
   if (period === 'week') {
     const day = now.getDay();
@@ -26,7 +27,7 @@ function getDateRange(period) {
     since = monday.toISOString().split('T')[0];
   } else if (period === 'month') {
     since = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-01`;
-  } else if (period === 'year') {
+  } else {
     since = `${now.getFullYear()}-01-01`;
   }
 
@@ -55,113 +56,113 @@ async function run() {
   const values = data.values;
   const colCount = values[0]?.length || 0;
 
-  for (let col = 1; col < colCount; col++) {
-    const adAccountId = values[2][col];
-    const metaToken = values[3][col];
-    const campaignIdRaw = values[4][col];
-    const shopifyToken = values[11][col];
-    const shopUrl = values[12][col];
-    const version = values[13][col];
+  const limit = pLimit(4); // ✅ Limitamos a 4 columnas simultáneas
 
-    for (const period of ['week', 'month', 'year']) {
-      const { since, until } = getDateRange(period);
+  const columnTasks = Array.from({ length: colCount - 1 }, (_, i) => i + 1).map((col) =>
+    limit(async () => {
+      const adAccountId = values[2][col];
+      const metaToken = values[3][col];
+      const campaignIdRaw = values[4][col];
+      const shopifyToken = values[11][col];
+      const shopUrl = values[12][col];
+      const version = values[13][col];
 
-      // Meta Ads
-      if (metaToken && campaignIdRaw) {
-        const campaignIds = campaignIdRaw.split(',').map(id => id.trim());
-        let totalSpend = 0;
+      for (const period of ['week', 'month', 'year']) {
+        const { since, until } = getDateRange(period);
 
-        for (const campaignId of campaignIds) {
-          const url = `https://graph.facebook.com/v19.0/${campaignId}/insights?fields=spend&access_token=${metaToken}&time_range[since]=${since}&time_range[until]=${until}&level=campaign&attribution_setting=7d_click_1d_view`;
+        if (metaToken && campaignIdRaw) {
+          const campaignIds = campaignIdRaw.split(',').map(id => id.trim());
+          const metaSpend = await Promise.all(campaignIds.map(async (campaignId) => {
+            const url = `https://graph.facebook.com/v19.0/${campaignId}/insights?fields=spend&access_token=${metaToken}&time_range[since]=${since}&time_range[until]=${until}&level=campaign&attribution_setting=7d_click_1d_view`;
+            try {
+              const res = await fetch(url);
+              const json = await res.json();
+              return parseFloat(json?.data?.[0]?.spend || "0.00");
+            } catch (e) {
+              console.log(`⚠️ Meta Ads error on campaign ${campaignId}: ${e.message}`);
+              return 0;
+            }
+          }));
+
+          const totalSpend = metaSpend.reduce((sum, val) => sum + val, 0);
+
+          await sheets.spreadsheets.values.update({
+            spreadsheetId: sheetId,
+            range: `${sheetName}!${String.fromCharCode(65 + col)}${metaRows[period]}`,
+            valueInputOption: 'RAW',
+            requestBody: { values: [[Math.round(totalSpend * 100) / 100]] },
+          });
+        }
+
+        if (shopifyToken && shopUrl && version) {
+          let totalSales = 0;
+          let orders = [];
+          let pageUrl = `${shopUrl}/admin/api/${version}/orders.json?created_at_min=${since}T00:00:00-04:00&created_at_max=${until}T23:59:59-04:00&status=any&limit=250`;
+
           try {
-            const response = await fetch(url);
-            const json = await response.json();
-            const spend = parseFloat(json?.data?.[0]?.spend || "0.00");
-            totalSpend += spend;
-          } catch (e) {
-            console.log(`⚠️ Meta Ads error on campaign ${campaignId}: ${e.message}`);
-          }
-        }
+            while (pageUrl) {
+              const response = await fetch(pageUrl, {
+                method: 'GET',
+                headers: { 'X-Shopify-Access-Token': shopifyToken }
+              });
+              const json = await response.json();
+              const data = json.orders || [];
 
-        await sheets.spreadsheets.values.update({
-          spreadsheetId: sheetId,
-          range: `${sheetName}!${String.fromCharCode(65 + col)}${metaRows[period]}`,
-          valueInputOption: 'RAW',
-          requestBody: { values: [[Math.round(totalSpend * 100) / 100]] },
-        });
-      }
-
-      // Shopify
-      if (shopifyToken && shopUrl && version) {
-        let orders = [];
-        let totalSales = 0;
-        let pageUrl = `${shopUrl}/admin/api/${version}/orders.json?created_at_min=${since}T00:00:00-04:00&created_at_max=${until}T23:59:59-04:00&status=any&limit=250`;
-
-        try {
-          while (pageUrl) {
-            const response = await fetch(pageUrl, {
-              method: 'GET',
-              headers: { 'X-Shopify-Access-Token': shopifyToken }
-            });
-            const json = await response.json();
-            const data = json.orders || [];
-
-            for (const order of data) {
-              for (const item of order.line_items || []) {
-                const price = parseFloat(item.price || 0);
-                const quantity = parseInt(item.quantity || 1);
-                totalSales += price * quantity;
+              for (const order of data) {
+                for (const item of order.line_items || []) {
+                  const price = parseFloat(item.price || 0);
+                  const quantity = parseInt(item.quantity || 1);
+                  totalSales += price * quantity;
+                }
+                orders.push(order);
               }
-              orders.push(order);
-            }
 
-            const linkHeader = response.headers.get('link');
-            if (linkHeader && linkHeader.includes('rel="next"')) {
-              const match = linkHeader.match(/<([^>]+)>;\s*rel="next"/);
+              const linkHeader = response.headers.get('link');
+              const match = linkHeader?.match(/<([^>]+)>;\s*rel="next"/);
               pageUrl = match ? match[1] : null;
-            } else {
-              pageUrl = null;
             }
-          }
 
-          await sheets.spreadsheets.values.batchUpdate({
-            spreadsheetId: sheetId,
-            requestBody: {
-              data: [
-                {
-                  range: `${sheetName}!${String.fromCharCode(65 + col)}${shopifyRows.sales[period]}`,
-                  values: [[Math.round(totalSales * 100) / 100]]
-                },
-                {
-                  range: `${sheetName}!${String.fromCharCode(65 + col)}${shopifyRows.orders[period]}`,
-                  values: [[orders.length]]
-                }
-              ],
-              valueInputOption: 'RAW'
-            }
-          });
-        } catch (e) {
-          console.log(`⚠️ Shopify error: ${e.message}`);
-          await sheets.spreadsheets.values.batchUpdate({
-            spreadsheetId: sheetId,
-            requestBody: {
-              data: [
-                {
-                  range: `${sheetName}!${String.fromCharCode(65 + col)}${shopifyRows.sales[period]}`,
-                  values: [["Error"]]
-                },
-                {
-                  range: `${sheetName}!${String.fromCharCode(65 + col)}${shopifyRows.orders[period]}`,
-                  values: [["Error"]]
-                }
-              ],
-              valueInputOption: 'RAW'
-            }
-          });
+            await sheets.spreadsheets.values.batchUpdate({
+              spreadsheetId: sheetId,
+              requestBody: {
+                data: [
+                  {
+                    range: `${sheetName}!${String.fromCharCode(65 + col)}${shopifyRows.sales[period]}`,
+                    values: [[Math.round(totalSales * 100) / 100]]
+                  },
+                  {
+                    range: `${sheetName}!${String.fromCharCode(65 + col)}${shopifyRows.orders[period]}`,
+                    values: [[orders.length]]
+                  }
+                ],
+                valueInputOption: 'RAW'
+              }
+            });
+          } catch (e) {
+            console.log(`⚠️ Shopify error: ${e.message}`);
+            await sheets.spreadsheets.values.batchUpdate({
+              spreadsheetId: sheetId,
+              requestBody: {
+                data: [
+                  {
+                    range: `${sheetName}!${String.fromCharCode(65 + col)}${shopifyRows.sales[period]}`,
+                    values: [["Error"]]
+                  },
+                  {
+                    range: `${sheetName}!${String.fromCharCode(65 + col)}${shopifyRows.orders[period]}`,
+                    values: [["Error"]]
+                  }
+                ],
+                valueInputOption: 'RAW'
+              }
+            });
+          }
         }
       }
-    }
-  }
+    })
+  );
+
+  await Promise.all(columnTasks);
 
   console.log("✅ Script ejecutado correctamente.");
 }
