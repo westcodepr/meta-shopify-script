@@ -5,7 +5,18 @@ const port = process.env.PORT || 8080;
 require('dotenv').config();
 const { google } = require('googleapis');
 const fetch = require('node-fetch');
-const pLimit = require('p-limit'); // ✅ Nuevo: controlar concurrencia
+const pLimit = require('p-limit');
+
+function columnLetter(col) {
+  let temp = '';
+  let letter = '';
+  while (col > 0) {
+    temp = (col - 1) % 26;
+    letter = String.fromCharCode(temp + 65) + letter;
+    col = (col - temp - 1) / 26;
+  }
+  return letter;
+}
 
 async function authorize() {
   const auth = new google.auth.GoogleAuth({
@@ -26,7 +37,7 @@ function getDateRange(period) {
     monday.setDate(now.getDate() - (day === 0 ? 6 : day - 1));
     since = monday.toISOString().split('T')[0];
   } else if (period === 'month') {
-    since = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-01`;
+    since = `${now.getFullYear()}-${String(now.getMonth() + 1).toString().padStart(2, '0')}-01`;
   } else {
     since = `${now.getFullYear()}-01-01`;
   }
@@ -48,24 +59,32 @@ async function run() {
     orders: { week: 18, month: 19, year: 20 }
   };
 
-  const { data } = await sheets.spreadsheets.values.get({
+  const headerRes = await sheets.spreadsheets.values.get({
     spreadsheetId: sheetId,
-    range: `${sheetName}!A1:Z21`,
+    range: `${sheetName}!A1:1`,
+    majorDimension: 'ROWS'
   });
 
-  const values = data.values;
-  const colCount = values[0]?.length || 0;
+  const header = headerRes.data.values?.[0] || [];
+  const colCount = header.length;
+  const endColLetter = columnLetter(colCount);
 
-  const limit = pLimit(4); // ✅ Limitamos a 4 columnas simultáneas
+  const fullDataRes = await sheets.spreadsheets.values.get({
+    spreadsheetId: sheetId,
+    range: `${sheetName}!A1:${endColLetter}21`,
+  });
+
+  const values = fullDataRes.data.values;
+  const limit = pLimit(4);
 
   const columnTasks = Array.from({ length: colCount - 1 }, (_, i) => i + 1).map((col) =>
     limit(async () => {
-      const adAccountId = values[2][col];
-      const metaToken = values[3][col];
-      const campaignIdRaw = values[4][col];
-      const shopifyToken = values[11][col];
-      const shopUrl = values[12][col];
-      const version = values[13][col];
+      const adAccountId = values[2]?.[col];
+      const metaToken = values[3]?.[col];
+      const campaignIdRaw = values[4]?.[col];
+      const shopifyToken = values[11]?.[col];
+      const shopUrl = values[12]?.[col];
+      const version = values[13]?.[col];
 
       for (const period of ['week', 'month', 'year']) {
         const { since, until } = getDateRange(period);
@@ -88,7 +107,7 @@ async function run() {
 
           await sheets.spreadsheets.values.update({
             spreadsheetId: sheetId,
-            range: `${sheetName}!${String.fromCharCode(65 + col)}${metaRows[period]}`,
+            range: `${sheetName}!${columnLetter(col + 1)}${metaRows[period]}`,
             valueInputOption: 'RAW',
             requestBody: { values: [[Math.round(totalSpend * 100) / 100]] },
           });
@@ -127,11 +146,11 @@ async function run() {
               requestBody: {
                 data: [
                   {
-                    range: `${sheetName}!${String.fromCharCode(65 + col)}${shopifyRows.sales[period]}`,
+                    range: `${sheetName}!${columnLetter(col + 1)}${shopifyRows.sales[period]}`,
                     values: [[Math.round(totalSales * 100) / 100]]
                   },
                   {
-                    range: `${sheetName}!${String.fromCharCode(65 + col)}${shopifyRows.orders[period]}`,
+                    range: `${sheetName}!${columnLetter(col + 1)}${shopifyRows.orders[period]}`,
                     values: [[orders.length]]
                   }
                 ],
@@ -141,21 +160,21 @@ async function run() {
           } catch (e) {
             console.log(`⚠️ Shopify error: ${e.message}`);
             await sheets.spreadsheets.values.batchUpdate({
-              spreadsheetId: sheetId,
-              requestBody: {
-                data: [
-                  {
-                    range: `${sheetName}!${String.fromCharCode(65 + col)}${shopifyRows.sales[period]}`,
-                    values: [["Error"]]
-                  },
-                  {
-                    range: `${sheetName}!${String.fromCharCode(65 + col)}${shopifyRows.orders[period]}`,
-                    values: [["Error"]]
-                  }
-                ],
-                valueInputOption: 'RAW'
-              }
-            });
+  spreadsheetId: sheetId,
+  requestBody: {
+    data: [
+      {
+        range: `${sheetName}!${columnLetter(col + 1)}${shopifyRows.sales[period]}`,
+        values: [[`Error: ${e.message}`]]
+      },
+      {
+        range: `${sheetName}!${columnLetter(col + 1)}${shopifyRows.orders[period]}`,
+        values: [[`Error: ${e.message}`]]
+      }
+    ],
+    valueInputOption: 'RAW'
+  }
+});
           }
         }
       }
