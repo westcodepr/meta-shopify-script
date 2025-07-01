@@ -5,6 +5,7 @@ const port = process.env.PORT || 8080;
 require('dotenv').config();
 const { google } = require('googleapis');
 const fetch = require('node-fetch');
+const pLimit = require('p-limit'); // ✅ Nuevo: controlar concurrencia
 
 async function authorize() {
   const auth = new google.auth.GoogleAuth({
@@ -55,8 +56,10 @@ async function run() {
   const values = data.values;
   const colCount = values[0]?.length || 0;
 
-  await Promise.all(
-    Array.from({ length: colCount - 1 }, (_, i) => i + 1).map(async (col) => {
+  const limit = pLimit(4); // ✅ Limitamos a 4 columnas simultáneas
+
+  const columnTasks = Array.from({ length: colCount - 1 }, (_, i) => i + 1).map((col) =>
+    limit(async () => {
       const adAccountId = values[2][col];
       const metaToken = values[3][col];
       const campaignIdRaw = values[4][col];
@@ -64,7 +67,7 @@ async function run() {
       const shopUrl = values[12][col];
       const version = values[13][col];
 
-      await Promise.all(['week', 'month', 'year'].map(async (period) => {
+      for (const period of ['week', 'month', 'year']) {
         const { since, until } = getDateRange(period);
 
         if (metaToken && campaignIdRaw) {
@@ -155,9 +158,11 @@ async function run() {
             });
           }
         }
-      }));
+      }
     })
   );
+
+  await Promise.all(columnTasks);
 
   console.log("✅ Script ejecutado correctamente.");
 }
