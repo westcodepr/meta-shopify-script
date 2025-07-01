@@ -14,6 +14,16 @@ function randomDelay() {
   return Math.floor(Math.random() * (10000 - 5000 + 1)) + 5000; // entre 5 y 10 segundos
 }
 
+// NUEVO: Convierte índice de columna a letra de Excel (ej. 0 => A, 26 => AA)
+function getColumnLetter(index) {
+  let letter = '';
+  while (index >= 0) {
+    letter = String.fromCharCode((index % 26) + 65) + letter;
+    index = Math.floor(index / 26) - 1;
+  }
+  return letter;
+}
+
 async function authorize() {
   const auth = new google.auth.GoogleAuth({
     keyFile: process.env.GOOGLE_APPLICATION_CREDENTIALS,
@@ -57,19 +67,19 @@ async function run() {
 
   const { data } = await sheets.spreadsheets.values.get({
     spreadsheetId: sheetId,
-    range: `${sheetName}!A1:Z21`,
+    range: `${sheetName}!A1:ZZ21`,
   });
 
   const values = data.values;
   const colCount = values[0]?.length || 0;
 
   for (let col = 1; col < colCount; col++) {
-    const adAccountId = values[2][col];
-    const metaToken = values[3][col];
-    const campaignIdRaw = values[4][col];
-    const shopifyToken = values[11][col];
-    const shopUrl = values[12][col];
-    const version = values[13][col];
+    const adAccountId = values[2]?.[col];
+    const metaToken = values[3]?.[col];
+    const campaignIdRaw = values[4]?.[col];
+    const shopifyToken = values[11]?.[col];
+    const shopUrl = values[12]?.[col];
+    const version = values[13]?.[col];
 
     for (const period of ['week', 'month', 'year']) {
       const { since, until } = getDateRange(period);
@@ -93,7 +103,7 @@ async function run() {
 
         await sheets.spreadsheets.values.update({
           spreadsheetId: sheetId,
-          range: `${sheetName}!${String.fromCharCode(65 + col)}${metaRows[period]}`,
+          range: `${sheetName}!${getColumnLetter(col)}${metaRows[period]}`,
           valueInputOption: 'RAW',
           requestBody: { values: [[Math.round(totalSpend * 100) / 100]] },
         });
@@ -137,11 +147,11 @@ async function run() {
             requestBody: {
               data: [
                 {
-                  range: `${sheetName}!${String.fromCharCode(65 + col)}${shopifyRows.sales[period]}`,
+                  range: `${sheetName}!${getColumnLetter(col)}${shopifyRows.sales[period]}`,
                   values: [[Math.round(totalSales * 100) / 100]]
                 },
                 {
-                  range: `${sheetName}!${String.fromCharCode(65 + col)}${shopifyRows.orders[period]}`,
+                  range: `${sheetName}!${getColumnLetter(col)}${shopifyRows.orders[period]}`,
                   values: [[orders.length]]
                 }
               ],
@@ -155,11 +165,11 @@ async function run() {
             requestBody: {
               data: [
                 {
-                  range: `${sheetName}!${String.fromCharCode(65 + col)}${shopifyRows.sales[period]}`,
+                  range: `${sheetName}!${getColumnLetter(col)}${shopifyRows.sales[period]}`,
                   values: [["Error"]]
                 },
                 {
-                  range: `${sheetName}!${String.fromCharCode(65 + col)}${shopifyRows.orders[period]}`,
+                  range: `${sheetName}!${getColumnLetter(col)}${shopifyRows.orders[period]}`,
                   values: [["Error"]]
                 }
               ],
@@ -170,7 +180,6 @@ async function run() {
       }
     }
 
-    // Espera entre 5 y 10 segundos antes de pasar a la próxima columna
     const delay = randomDelay();
     console.log(`⏳ Esperando ${delay / 1000} segundos antes de continuar con la próxima columna...`);
     await sleep(delay);
