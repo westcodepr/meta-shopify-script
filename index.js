@@ -176,10 +176,10 @@ app.get('/', async (req, res) => {
     res.send('✅ El script se ejecutó correctamente desde Cloud Run.');
   } catch (err) {
     console.error(err);
-    res.status(500).send('❌ Hubo un error al ejecutar el script.');
+    res.status(500).send(`
+      ❌ Hubo un error al ejecutar el script.<br><br>
+      <pre>${err.message}</pre>
+      <pre>${err.stack}</pre>
+    `);
   }
-});
-
-app.listen(port, () => {
-  console.log(`🟢 Servidor escuchando en el puerto ${port}`);
 });
