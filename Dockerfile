@@ -11,4 +11,4 @@ COPY . .
 
 # Exponer puerto 8080 y ejecutar app
 EXPOSE 8080
-CMD ["npm", "start"]
+CMD ["npm", "index.js"]
