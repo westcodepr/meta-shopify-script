@@ -2,11 +2,9 @@ const express = require('express');
 const app = express();
 const port = process.env.PORT || 8080;
 
-// index.js
 require('dotenv').config();
 const { google } = require('googleapis');
 const fetch = require('node-fetch');
-const fs = require('fs');
 
 // Autenticación con Google Sheets API
 async function authorize() {
@@ -37,12 +35,14 @@ function getDateRange(period) {
   return { since, until };
 }
 
-// Lógica principal
+// Función principal
 async function run() {
   const client = await authorize();
   const sheets = google.sheets({ version: 'v4', auth: client });
   const sheetId = process.env.SHEET_ID;
   const sheetName = 'Shopify Meta';
+
+  if (!sheetId) throw new Error('❌ Falta la variable de entorno SHEET_ID.');
 
   const metaRows = { week: 6, month: 7, year: 8 };
   const shopifyRows = {
@@ -56,7 +56,7 @@ async function run() {
   });
 
   const values = data.values;
-  const colCount = values[0].length;
+  const colCount = values[0]?.length || 0;
 
   for (let col = 1; col < colCount; col++) {
     const adAccountId = values[2][col];
@@ -82,7 +82,7 @@ async function run() {
             const spend = parseFloat(json?.data?.[0]?.spend || "0.00");
             totalSpend += spend;
           } catch (e) {
-            console.log(`Meta Ads error on campaign ${campaignId}: ${e.message}`);
+            console.log(`⚠️ Meta Ads error on campaign ${campaignId}: ${e.message}`);
           }
         }
 
@@ -144,6 +144,7 @@ async function run() {
             }
           });
         } catch (e) {
+          console.log(`⚠️ Shopify error: ${e.message}`);
           await sheets.spreadsheets.values.batchUpdate({
             spreadsheetId: sheetId,
             requestBody: {
@@ -164,11 +165,14 @@ async function run() {
       }
     }
   }
+
+  console.log("✅ Script ejecutado correctamente.");
 }
 
+// Endpoint HTTP para Cloud Run
 app.get('/', async (req, res) => {
   try {
-    await run(); // llamada correcta a tu función principal
+    await run();
     res.send('✅ El script se ejecutó correctamente desde Cloud Run.');
   } catch (err) {
     console.error(err);
