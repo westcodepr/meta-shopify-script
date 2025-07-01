@@ -15,7 +15,7 @@ async function authorize() {
 }
 
 function getDateRange(period) {
-  const tzOffset = -4 * 60;
+  const tzOffset = -4 * 60; // UTC-4
   const now = new Date(new Date().getTime() + tzOffset * 60000);
   let since = "", until = now.toISOString().split('T')[0];
 
@@ -49,19 +49,19 @@ async function run() {
 
   const { data } = await sheets.spreadsheets.values.get({
     spreadsheetId: sheetId,
-    range: `${sheetName}!A1:1`, // Traer todas las columnas usadas
+    range: `${sheetName}!A1:Z21`,
   });
 
   const values = data.values;
   const colCount = values[0]?.length || 0;
 
   for (let col = 1; col < colCount; col++) {
-    const adAccountId = values[2]?.[col];
-    const metaToken = values[3]?.[col];
-    const campaignIdRaw = values[4]?.[col];
-    const shopifyToken = values[11]?.[col];
-    const shopUrl = values[12]?.[col];
-    const version = values[13]?.[col];
+    const adAccountId = values[2][col];
+    const metaToken = values[3][col];
+    const campaignIdRaw = values[4][col];
+    const shopifyToken = values[11][col];
+    const shopUrl = values[12][col];
+    const version = values[13][col];
 
     for (const period of ['week', 'month', 'year']) {
       const { since, until } = getDateRange(period);
@@ -85,7 +85,7 @@ async function run() {
 
         await sheets.spreadsheets.values.update({
           spreadsheetId: sheetId,
-          range: `${sheetName}!${String.fromCharCode(65 + (col % 26))}${metaRows[period]}`,
+          range: `${sheetName}!${String.fromCharCode(65 + col)}${metaRows[period]}`,
           valueInputOption: 'RAW',
           requestBody: { values: [[Math.round(totalSpend * 100) / 100]] },
         });
@@ -103,12 +103,6 @@ async function run() {
               method: 'GET',
               headers: { 'X-Shopify-Access-Token': shopifyToken }
             });
-
-            if (!response.ok) {
-              const errorBody = await response.text();
-              throw new Error(`Shopify API error: ${response.status} ${response.statusText}\n${errorBody}`);
-            }
-
             const json = await response.json();
             const data = json.orders || [];
 
@@ -135,11 +129,11 @@ async function run() {
             requestBody: {
               data: [
                 {
-                  range: `${sheetName}!${String.fromCharCode(65 + (col % 26))}${shopifyRows.sales[period]}`,
+                  range: `${sheetName}!${String.fromCharCode(65 + col)}${shopifyRows.sales[period]}`,
                   values: [[Math.round(totalSales * 100) / 100]]
                 },
                 {
-                  range: `${sheetName}!${String.fromCharCode(65 + (col % 26))}${shopifyRows.orders[period]}`,
+                  range: `${sheetName}!${String.fromCharCode(65 + col)}${shopifyRows.orders[period]}`,
                   values: [[orders.length]]
                 }
               ],
@@ -147,18 +141,18 @@ async function run() {
             }
           });
         } catch (e) {
-          console.log(`⚠️ Shopify error (col ${col}): ${e.message}`);
+          console.log(`⚠️ Shopify error: ${e.message}`);
           await sheets.spreadsheets.values.batchUpdate({
             spreadsheetId: sheetId,
             requestBody: {
               data: [
                 {
-                  range: `${sheetName}!${String.fromCharCode(65 + (col % 26))}${shopifyRows.sales[period]}`,
-                  values: [[`Error: ${e.message}`]]
+                  range: `${sheetName}!${String.fromCharCode(65 + col)}${shopifyRows.sales[period]}`,
+                  values: [["Error"]]
                 },
                 {
-                  range: `${sheetName}!${String.fromCharCode(65 + (col % 26))}${shopifyRows.orders[period]}`,
-                  values: [[`Error`]]
+                  range: `${sheetName}!${String.fromCharCode(65 + col)}${shopifyRows.orders[period]}`,
+                  values: [["Error"]]
                 }
               ],
               valueInputOption: 'RAW'
