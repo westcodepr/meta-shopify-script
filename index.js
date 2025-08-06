@@ -14,7 +14,6 @@ function randomDelay() {
   return Math.floor(Math.random() * (10000 - 5000 + 1)) + 5000; // entre 5 y 10 segundos
 }
 
-// NUEVO: Convierte índice de columna a letra de Excel (ej. 0 => A, 26 => AA)
 function getColumnLetter(index) {
   let letter = '';
   while (index >= 0) {
@@ -59,15 +58,30 @@ async function run() {
 
   if (!sheetId) throw new Error('❌ Falta la variable de entorno SHEET_ID.');
 
-  const metaRows = { week: 6, month: 7, year: 8 };
+  // 🟦 NUEVAS FILAS para Meta Ads
+  const metaRows = {
+    week: 6,
+    month: 8,
+    year: 10
+  };
+
+  // 🟩 NUEVAS FILAS para Shopify
   const shopifyRows = {
-    sales: { week: 15, month: 16, year: 17 },
-    orders: { week: 18, month: 19, year: 20 }
+    sales: {
+      week: 18,
+      month: 20,
+      year: 22
+    },
+    orders: {
+      week: 24,
+      month: 26,
+      year: 28
+    }
   };
 
   const { data } = await sheets.spreadsheets.values.get({
     spreadsheetId: sheetId,
-    range: `${sheetName}!A1:ZZ21`,
+    range: `${sheetName}!A1:ZZ30`,
   });
 
   const values = data.values;
@@ -77,9 +91,11 @@ async function run() {
     const adAccountId = values[2]?.[col];
     const metaToken = values[3]?.[col];
     const campaignIdRaw = values[4]?.[col];
-    const shopifyToken = values[11]?.[col];
-    const shopUrl = values[12]?.[col];
-    const version = values[13]?.[col];
+
+    // 🔁 FILAS ACTUALIZADAS para credenciales Shopify
+    const shopifyToken = values[14]?.[col];
+    const shopUrl = values[15]?.[col];
+    const version = values[16]?.[col];
 
     for (const period of ['week', 'month', 'year']) {
       const { since, until } = getDateRange(period);
