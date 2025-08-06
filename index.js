@@ -179,7 +179,7 @@ async function run(mode) {
 
             const linkHeader = response.headers.get('link');
             if (linkHeader && linkHeader.includes('rel="next"')) {
-              const match = linkHeader.match(/<([^>]+)>;\\s*rel="next"/);
+              const match = linkHeader.match(/<([^>]+)>;\s*rel="next"/); // ← CORREGIDO AQUÍ
               pageUrl = match ? match[1] : null;
             } else {
               pageUrl = null;
