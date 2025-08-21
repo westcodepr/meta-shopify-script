@@ -1,6 +1,7 @@
 const express = require('express');
 const app = express();
 const port = process.env.PORT || 8080;
+
 require('dotenv').config();
 const { google } = require('googleapis');
 const fetch = require('node-fetch');
@@ -33,41 +34,32 @@ async function authorize() {
 function getDateRange(period) {
   const tzOffset = -4 * 60;
   const now = new Date(new Date().getTime() + tzOffset * 60000);
-  let since = '', until = now.toISOString();
+  let since = "", until = now.toISOString().split('T')[0];
 
   const mondayOfThisWeek = new Date(now);
-  mondayOfThisWeek.setUTCDate(
-    mondayOfThisWeek.getUTCDate() - (mondayOfThisWeek.getUTCDay() === 0 ? 6 : mondayOfThisWeek.getUTCDay() - 1)
-  );
-  mondayOfThisWeek.setUTCHours(0, 0, 0, 0);
+  mondayOfThisWeek.setDate(now.getDate() - (now.getDay() === 0 ? 6 : now.getDay() - 1));
 
-  if (period === 'week' || period === 'current') {
-    since = mondayOfThisWeek.toISOString();
+  if (period === 'week') {
+    since = mondayOfThisWeek.toISOString().split('T')[0];
   } else if (period === 'lastWeek') {
     const monday = new Date(mondayOfThisWeek);
-    monday.setUTCDate(monday.getUTCDate() - 7);
-    monday.setUTCHours(0, 0, 0, 0);
+    monday.setDate(monday.getDate() - 7);
     const sunday = new Date(mondayOfThisWeek);
-    sunday.setUTCDate(sunday.getUTCDate() - 1);
-    sunday.setUTCHours(23, 59, 59, 999);
-    since = monday.toISOString();
-    until = sunday.toISOString();
+    sunday.setDate(sunday.getDate() - 1);
+    since = monday.toISOString().split('T')[0];
+    until = sunday.toISOString().split('T')[0];
   } else if (period === 'month') {
-    const firstDay = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
-    since = firstDay.toISOString();
+    since = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-01`;
   } else if (period === 'lastMonth') {
-    const firstDay = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - 1, 1));
-    const lastDay = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 0, 23, 59, 59, 999));
-    since = firstDay.toISOString();
-    until = lastDay.toISOString();
+    const firstDay = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+    const lastDay = new Date(now.getFullYear(), now.getMonth(), 0);
+    since = firstDay.toISOString().split('T')[0];
+    until = lastDay.toISOString().split('T')[0];
   } else if (period === 'year') {
-    const janFirst = new Date(Date.UTC(now.getUTCFullYear(), 0, 1));
-    since = janFirst.toISOString();
+    since = `${now.getFullYear()}-01-01`;
   } else if (period === 'lastYear') {
-    const firstDay = new Date(Date.UTC(now.getUTCFullYear() - 1, 0, 1));
-    const lastDay = new Date(Date.UTC(now.getUTCFullYear() - 1, 11, 31, 23, 59, 59, 999));
-    since = firstDay.toISOString();
-    until = lastDay.toISOString();
+    since = `${now.getFullYear() - 1}-01-01`;
+    until = `${now.getFullYear() - 1}-12-31`;
   }
 
   return { since, until };
@@ -78,31 +70,50 @@ async function run(mode) {
   const sheets = google.sheets({ version: 'v4', auth: client });
   const sheetId = process.env.SHEET_ID;
   const sheetName = 'Shopify Meta';
+
   if (!sheetId) throw new Error('❌ Falta la variable de entorno SHEET_ID.');
 
   let periods, metaRows, shopifyRows;
+
   if (mode === 'lastWeek') {
     periods = ['lastWeek'];
     metaRows = { lastWeek: 7 };
-    shopifyRows = { sales: { lastWeek: 19 }, orders: { lastWeek: 25 } };
+    shopifyRows = {
+      sales: { lastWeek: 19 },
+      orders: { lastWeek: 25 }
+    };
   } else if (mode === 'lastMonth') {
     periods = ['lastMonth'];
     metaRows = { lastMonth: 9 };
-    shopifyRows = { sales: { lastMonth: 21 }, orders: { lastMonth: 27 } };
+    shopifyRows = {
+      sales: { lastMonth: 21 },
+      orders: { lastMonth: 27 }
+    };
   } else if (mode === 'lastYear') {
     periods = ['lastYear'];
     metaRows = { lastYear: 11 };
-    shopifyRows = { sales: { lastYear: 23 }, orders: { lastYear: 29 } };
+    shopifyRows = {
+      sales: { lastYear: 23 },
+      orders: { lastYear: 29 }
+    };
   } else {
     periods = ['week', 'month', 'year'];
-    metaRows = { week: 6, month: 8, year: 10 };
-    shopifyRows = { sales: { week: 18, month: 20, year: 22 }, orders: { week: 24, month: 26, year: 28 } };
+    metaRows = {
+      week: 6,
+      month: 8,
+      year: 10
+    };
+    shopifyRows = {
+      sales: { week: 18, month: 20, year: 22 },
+      orders: { week: 24, month: 26, year: 28 }
+    };
   }
 
   const { data } = await sheets.spreadsheets.values.get({
     spreadsheetId: sheetId,
     range: `${sheetName}!A1:ZZ30`,
   });
+
   const values = data.values;
   const colCount = values[0]?.length || 0;
 
@@ -121,6 +132,7 @@ async function run(mode) {
       if (metaToken && campaignIdRaw) {
         const campaignIds = campaignIdRaw.split(',').map(id => id.trim());
         let totalSpend = 0;
+
         for (const campaignId of campaignIds) {
           const url = `https://graph.facebook.com/v19.0/${campaignId}/insights?fields=spend&access_token=${metaToken}&time_range[since]=${since}&time_range[until]=${until}&level=campaign&attribution_setting=7d_click_1d_view`;
           try {
@@ -132,6 +144,7 @@ async function run(mode) {
             console.log(`⚠️ Meta Ads error on campaign ${campaignId}: ${e.message}`);
           }
         }
+
         await sheets.spreadsheets.values.update({
           spreadsheetId: sheetId,
           range: `${sheetName}!${getColumnLetter(col)}${metaRows[period]}`,
@@ -144,7 +157,8 @@ async function run(mode) {
       if (shopifyToken && shopUrl && version) {
         let orders = [];
         let totalSales = 0;
-        let pageUrl = `${shopUrl}/admin/api/${version}/orders.json?created_at_min=${since}&created_at_max=${until}&status=any&limit=250`;
+        let pageUrl = `${shopUrl}/admin/api/${version}/orders.json?created_at_min=${since}T00:00:00-04:00&created_at_max=${until}T23:59:59-04:00&status=any&limit=250`;
+
         try {
           while (pageUrl) {
             const response = await fetch(pageUrl, {
@@ -153,6 +167,7 @@ async function run(mode) {
             });
             const json = await response.json();
             const data = json.orders || [];
+
             for (const order of data) {
               for (const item of order.line_items || []) {
                 const price = parseFloat(item.price || 0);
@@ -161,14 +176,17 @@ async function run(mode) {
               }
               orders.push(order);
             }
+
             const linkHeader = response.headers.get('link');
             if (linkHeader && linkHeader.includes('rel="next"')) {
-              const match = linkHeader.match(/<([^>]+)>;\s*rel="next"/);
+              const match = linkHeader.match(/<([^>]+)>;\\s*rel="next"/);
+              const match = linkHeader.match(/<([^>]+)>;\s*rel="next"/); // ← CORREGIDO AQUÍ
               pageUrl = match ? match[1] : null;
             } else {
               pageUrl = null;
             }
           }
+
           await sheets.spreadsheets.values.batchUpdate({
             spreadsheetId: sheetId,
             requestBody: {
@@ -190,10 +208,12 @@ async function run(mode) {
         }
       }
     }
+
     const delay = randomDelay();
     console.log(`⏳ Esperando ${delay / 1000} segundos antes de continuar con la próxima columna...`);
     await sleep(delay);
   }
+
   console.log("✅ Script ejecutado correctamente.");
 }
 
@@ -204,7 +224,11 @@ app.get('/', async (req, res) => {
     res.send(`✅ Script ejecutado correctamente con mode=${mode}`);
   } catch (err) {
     console.error(err);
-    res.status(500).send(`❌ Hubo un error al ejecutar el script.<br><br><pre>${err.message}</pre><pre>${err.stack}</pre>`);
+    res.status(500).send(`
+      ❌ Hubo un error al ejecutar el script.<br><br>
+      <pre>${err.message}</pre>
+      <pre>${err.stack}</pre>
+    `);
   }
 });
 
