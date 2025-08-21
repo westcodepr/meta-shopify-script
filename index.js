@@ -25,6 +25,7 @@ function getColumnLetter(index) {
 
 async function authorize() {
   const auth = new google.auth.GoogleAuth({
+    keyFile: process.env.GOOGLE_APPLICATION_CREDENTIALS,
     scopes: ['https://www.googleapis.com/auth/spreadsheets']
   });
   return await auth.getClient();
@@ -178,6 +179,7 @@ async function run(mode) {
 
             const linkHeader = response.headers.get('link');
             if (linkHeader && linkHeader.includes('rel="next"')) {
+              const match = linkHeader.match(/<([^>]+)>;\\s*rel="next"/);
               const match = linkHeader.match(/<([^>]+)>;\s*rel="next"/); // ← CORREGIDO AQUÍ
               pageUrl = match ? match[1] : null;
             } else {
