@@ -32,7 +32,45 @@ async function authorize() {
   return await auth.getClient();
 }
 
+// ---------- Zona horaria de la tienda ----------
+function offsetFromTimeZone(timeZone, date) {
+  try {
+    const parts = new Intl.DateTimeFormat('en-US', {
+      timeZone,
+      hour12: false,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      timeZoneName: 'shortOffset'
+    }).formatToParts(date);
+    const tzName = parts.find(p => p.type === 'timeZoneName')?.value || ''; // p.ej. "GMT-4"
+    const m = tzName.match(/(GMT|UTC)([+-]\d{1,2})(?::?(\d{2}))?/i);
+    if (m) {
+      const sign = m[2].startsWith('-') ? '-' : '+';
+      const hh = String(Math.abs(parseInt(m[2], 10))).padStart(2, '0');
+      const mm = m[3] ? m[3] : '00';
+      return `${sign}${hh}:${mm}`;
+    }
+  } catch {}
+  return '+00:00';
+}
+
+function makeRangeForDate(dateStr, timeZone) {
+  // Usamos mediodía para obtener el offset del día (DST-safe)
+  const probeUtc = new Date(`${dateStr}T12:00:00Z`);
+  const off = offsetFromTimeZone(timeZone, probeUtc);
+  return {
+    min: `${dateStr}T00:00:00${off}`,
+    max: `${dateStr}T23:59:59${off}`,
+    offset: off
+  };
+}
+
 function getDateRange(period) {
+  // Igual que tu lógica original (la zona fina la ajustamos arriba)
   const tzOffset = -4 * 60;
   const now = new Date(new Date().getTime() + tzOffset * 60000);
   let since = "", until = now.toISOString().split('T')[0];
@@ -64,6 +102,55 @@ function getDateRange(period) {
   }
 
   return { since, until };
+}
+
+async function getShopTimeZone(shopUrl, version, token) {
+  try {
+    const r = await fetch(`${shopUrl}/admin/api/${version}/shop.json`, {
+      headers: { 'X-Shopify-Access-Token': token }
+    });
+    if (!r.ok) return null;
+    const js = await r.json();
+    return js?.shop?.iana_timezone || js?.shop?.timezone || null;
+  } catch {
+    return null;
+  }
+}
+
+// ---------- Cálculo robusto de refunds (solo items+tax) ----------
+function refundItemsAmount(refund) {
+  let items = 0;
+
+  // (A) Preferimos transactions; restamos shipping si viene en refund.shipping.amount
+  if (Array.isArray(refund.transactions) && refund.transactions.length) {
+    let tx = 0;
+    for (const t of refund.transactions) {
+      if ((t.kind === 'refund' || t.kind === 'sale_refund') && t.status === 'success') {
+        const amt = Math.abs(parseFloat(t.amount ?? '0'));
+        if (!isNaN(amt)) tx += amt;
+      }
+    }
+    const ship = refund?.shipping?.amount ? Math.abs(parseFloat(refund.shipping.amount) || 0) : 0;
+    items += Math.max(0, tx - ship);
+    if (items > 0) return items; // suficiente
+  }
+
+  // (B) Fallback: refund_line_items (subtotal + total_tax)
+  if (Array.isArray(refund.refund_line_items) && refund.refund_line_items.length) {
+    for (const rli of refund.refund_line_items) {
+      const subtotal = parseFloat(rli.subtotal ?? rli.subtotal_set?.shop_money?.amount ?? '0') || 0;
+      const tax = parseFloat(rli.total_tax ?? rli.total_tax_set?.shop_money?.amount ?? '0') || 0;
+      items += Math.abs(subtotal + tax);
+    }
+    if (items > 0) return items;
+  }
+
+  // (C) Último recurso: amount (si lo hay)
+  if (refund.amount != null) {
+    const amt = Math.abs(parseFloat(refund.amount) || 0);
+    items += amt;
+  }
+  return items;
 }
 
 async function run(mode) {
@@ -99,11 +186,7 @@ async function run(mode) {
     };
   } else {
     periods = ['week', 'month', 'year'];
-    metaRows = {
-      week: 6,
-      month: 8,
-      year: 10
-    };
+    metaRows = { week: 6, month: 8, year: 10 };
     shopifyRows = {
       sales: { week: 18, month: 20, year: 22 },
       orders: { week: 24, month: 26, year: 28 }
@@ -119,136 +202,97 @@ async function run(mode) {
   const colCount = values[0]?.length || 0;
 
   for (let col = 1; col < colCount; col++) {
-    const adAccountId = values[2]?.[col];
     const metaToken = values[3]?.[col];
     const campaignIdRaw = values[4]?.[col];
     const shopifyToken = values[14]?.[col];
     const shopUrl = values[15]?.[col];
     const version = values[16]?.[col];
 
+    // Zona horaria de la tienda por columna
+    let shopTimeZone = 'UTC';
+    if (shopifyToken && shopUrl && version) {
+      const tz = await getShopTimeZone(shopUrl, version, shopifyToken);
+      if (tz) shopTimeZone = tz;
+    }
+
     for (const period of periods) {
       const { since, until } = getDateRange(period);
 
-      // ---------------- Meta Ads (con marcadores de error) ----------------
+      // -------- Meta Ads --------
       if (metaToken && campaignIdRaw) {
         const campaignIds = campaignIdRaw.split(',').map(id => id.trim());
-        let totalSpend = 0;
-        let metaError = false;
-        let metaErrorMsg = 'ERROR API (Meta)';
+        let totalSpend = 0, metaError = false, metaErrorMsg = 'ERROR API (Meta)';
 
         for (const campaignId of campaignIds) {
           const url = `https://graph.facebook.com/v19.0/${campaignId}/insights?fields=spend&access_token=${metaToken}&time_range[since]=${since}&time_range[until]=${until}&level=campaign&attribution_setting=7d_click_1d_view`;
           try {
             const response = await fetch(url);
-            if (!response.ok) {
-              metaError = true;
-              metaErrorMsg = `ERROR API (Meta ${response.status})`;
-              console.log(`⚠️ Meta Ads HTTP ${response.status} for campaign ${campaignId}`);
-              break;
-            }
+            if (!response.ok) { metaError = true; metaErrorMsg = `ERROR API (Meta ${response.status})`; break; }
             const json = await response.json();
             const spend = parseFloat(json?.data?.[0]?.spend || "0");
-            if (isNaN(spend)) {
-              metaError = true;
-              metaErrorMsg = `ERROR API (Meta parse)`;
-              break;
-            }
+            if (isNaN(spend)) { metaError = true; metaErrorMsg = 'ERROR API (Meta parse)'; break; }
             totalSpend += spend;
-          } catch (e) {
-            metaError = true;
-            metaErrorMsg = `ERROR API (Meta fetch)`;
-            console.log(`⚠️ Meta Ads error on campaign ${campaignId}: ${e.message}`);
-            break;
-          }
+          } catch (e) { metaError = true; metaErrorMsg = 'ERROR API (Meta fetch)'; break; }
         }
 
         await sheets.spreadsheets.values.update({
           spreadsheetId: sheetId,
           range: `${sheetName}!${getColumnLetter(col)}${metaRows[period]}`,
           valueInputOption: 'RAW',
-          requestBody: {
-            values: [[ metaError ? metaErrorMsg : Math.round(totalSpend * 100) / 100 ]]
-          },
+          requestBody: { values: [[ metaError ? metaErrorMsg : Math.round(totalSpend * 100) / 100 ]] }
         });
       }
 
-      // ---------------- Shopify (Total sales + marcadores de error) ----------------
+      // -------- Shopify: Total sales --------
       if (shopifyToken && shopUrl && version) {
-        const tz = "-04:00";
-        const createdMin = `${since}T00:00:00${tz}`;
-        const createdMax = `${until}T23:59:59${tz}`;
+        // Construcción de rangos con TZ de la tienda
+        const createdStart = makeRangeForDate(since, shopTimeZone);
+        const createdEnd   = makeRangeForDate(until, shopTimeZone);
+        const createdMin = createdStart.min;
+        const createdMax = createdEnd.max;
         const updatedMin = createdMin;
         const updatedMax = createdMax;
 
         let orders = [];
-        let totalSalesPositives = 0;   // suma de total_price por fecha de venta (created_at)
-        let totalRefundsInRange = 0;   // refunds por fecha de processed_at
+        let totalSalesPositives = 0; // sum(total_price) de pedidos creados
+        let totalRefundsItems = 0;   // solo items+tax (sin shipping)
         let shopifyError = false;
         let shopifyErrorMsg = 'ERROR API (Shopify)';
 
-        // ---- Pasada A: pedidos creados en el rango (ventas positivas) ----
-        // (No restamos refunds aquí para evitar doble descuento)
+        // (A) Ventas positivas
         let pageUrl = `${shopUrl}/admin/api/${version}/orders.json?` +
                       `created_at_min=${encodeURIComponent(createdMin)}&created_at_max=${encodeURIComponent(createdMax)}` +
                       `&status=any&limit=250`;
         try {
           while (pageUrl) {
-            const response = await fetch(pageUrl, {
-              method: 'GET',
-              headers: { 'X-Shopify-Access-Token': shopifyToken }
-            });
-            if (!response.ok) {
-              shopifyError = true;
-              shopifyErrorMsg = `ERROR API (Shopify ${response.status})`;
-              console.log(`⚠️ Shopify HTTP ${response.status} en ventas`);
-              break;
-            }
+            const response = await fetch(pageUrl, { headers: { 'X-Shopify-Access-Token': shopifyToken } });
+            if (!response.ok) { shopifyError = true; shopifyErrorMsg = `ERROR API (Shopify ${response.status})`; break; }
             const json = await response.json();
             const data = json.orders || [];
-
             for (const order of data) {
               const total = parseFloat(order.total_price ?? "0");
-              if (isNaN(total)) {
-                shopifyError = true;
-                shopifyErrorMsg = 'ERROR API (Shopify parse total_price)';
-                break;
-              }
+              if (isNaN(total)) { shopifyError = true; shopifyErrorMsg = 'ERROR API (Shopify parse total_price)'; break; }
               totalSalesPositives += total;
               orders.push(order);
             }
             if (shopifyError) break;
-
             const linkHeader = response.headers.get('link');
             if (linkHeader && linkHeader.includes('rel="next"')) {
               const match = linkHeader.match(/<([^>]+)>\;\s*rel="next"/);
               pageUrl = match ? match[1] : null;
-            } else {
-              pageUrl = null;
-            }
+            } else { pageUrl = null; }
           }
-        } catch (e) {
-          shopifyError = true;
-          shopifyErrorMsg = 'ERROR API (Shopify fetch ventas)';
-          console.log(`⚠️ Shopify (ventas) error: ${e.message}`);
-        }
+        } catch (e) { shopifyError = true; shopifyErrorMsg = 'ERROR API (Shopify fetch ventas)'; }
 
-        // ---- Pasada B: pedidos actualizados en el rango (refunds por processed_at) ----
+        // (B) Returns por processed_at (excluyendo shipping)
         if (!shopifyError) {
           let updatedUrl = `${shopUrl}/admin/api/${version}/orders.json?` +
                            `updated_at_min=${encodeURIComponent(updatedMin)}&updated_at_max=${encodeURIComponent(updatedMax)}` +
                            `&status=any&limit=250`;
           try {
             while (updatedUrl) {
-              const response = await fetch(updatedUrl, {
-                method: 'GET',
-                headers: { 'X-Shopify-Access-Token': shopifyToken }
-              });
-              if (!response.ok) {
-                shopifyError = true;
-                shopifyErrorMsg = `ERROR API (Shopify ${response.status} refunds)`;
-                console.log(`⚠️ Shopify HTTP ${response.status} en refunds`);
-                break;
-              }
+              const response = await fetch(updatedUrl, { headers: { 'X-Shopify-Access-Token': shopifyToken } });
+              if (!response.ok) { shopifyError = true; shopifyErrorMsg = `ERROR API (Shopify ${response.status} refunds)`; break; }
               const json = await response.json();
               const data = json.orders || [];
 
@@ -257,49 +301,25 @@ async function run(mode) {
                 for (const r of refunds) {
                   const processedAt = r.processed_at ? new Date(r.processed_at) : null;
                   if (!processedAt) continue;
-
                   const ts = processedAt.getTime();
-                  const inRange =
-                    ts >= new Date(updatedMin).getTime() &&
-                    ts <= new Date(updatedMax).getTime();
+                  const inRange = ts >= new Date(updatedMin).getTime() && ts <= new Date(updatedMax).getTime();
                   if (!inRange) continue;
 
-                  // Preferimos transactions (incluyen impuestos+shipping).
-                  let refundAmount = 0;
-                  if (Array.isArray(r.transactions) && r.transactions.length) {
-                    for (const t of r.transactions) {
-                      if ((t.kind === 'refund' || t.kind === 'sale_refund') && t.status === 'success') {
-                        const amt = Math.abs(parseFloat(t.amount ?? "0"));
-                        if (!isNaN(amt)) refundAmount += amt;
-                      }
-                    }
-                  } else if (r.amount != null) {
-                    // Fallback por si Shopify provee un monto agregado.
-                    const amt = Math.abs(parseFloat(r.amount));
-                    if (!isNaN(amt)) refundAmount += amt;
-                  }
-                  totalRefundsInRange += refundAmount;
+                  const itemsAmount = refundItemsAmount(r);
+                  totalRefundsItems += itemsAmount;
                 }
               }
-
-              if (shopifyError) break;
 
               const linkHeader = response.headers.get('link');
               if (linkHeader && linkHeader.includes('rel="next"')) {
                 const match = linkHeader.match(/<([^>]+)>\;\s*rel="next"/);
                 updatedUrl = match ? match[1] : null;
-              } else {
-                updatedUrl = null;
-              }
+              } else { updatedUrl = null; }
             }
-          } catch (e) {
-            shopifyError = true;
-            shopifyErrorMsg = 'ERROR API (Shopify fetch refunds)';
-            console.log(`⚠️ Shopify (refunds) error: ${e.message}`);
-          }
+          } catch (e) { shopifyError = true; shopifyErrorMsg = 'ERROR API (Shopify fetch refunds)'; }
         }
 
-        // ---- Escribir resultado / o marcador de error ----
+        // Escritura
         if (shopifyError) {
           await sheets.spreadsheets.values.batchUpdate({
             spreadsheetId: sheetId,
@@ -312,7 +332,8 @@ async function run(mode) {
             }
           });
         } else {
-          const totalSales = Math.round((totalSalesPositives - totalRefundsInRange) * 100) / 100;
+          const totalSales = Math.round((totalSalesPositives - totalRefundsItems) * 100) / 100;
+          console.log(`[${period}] tz=${shopTimeZone} off=${createdStart.offset} ventas=${totalSalesPositives.toFixed(2)} returns_items=${totalRefundsItems.toFixed(2)} total=${totalSales.toFixed(2)}`);
           await sheets.spreadsheets.values.batchUpdate({
             spreadsheetId: sheetId,
             requestBody: {
@@ -325,7 +346,7 @@ async function run(mode) {
           });
         }
       } else {
-        // credenciales faltantes de Shopify: marcamos error explícito
+        // Credenciales faltantes
         const salesRow = shopifyRows.sales[period];
         const ordersRow = shopifyRows.orders[period];
         await sheets.spreadsheets.values.batchUpdate({
@@ -349,7 +370,7 @@ async function run(mode) {
   console.log("✅ Script ejecutado correctamente.");
 }
 
-// Health endpoint para readiness/liveness
+// Health endpoint
 app.get('/healthz', (_req, res) => res.status(200).send('ok'));
 
 // Endpoint de ejecución manual
@@ -368,7 +389,7 @@ app.get('/', async (req, res) => {
   }
 });
 
-// Bind en 0.0.0.0 para Cloud Run
+// Cloud Run bind
 app.listen(port, '0.0.0.0', () => {
   console.log(`🟢 Servidor escuchando en el puerto ${port}`);
 });
