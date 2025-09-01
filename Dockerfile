@@ -1,14 +1,22 @@
-# Imagen base de Node.js
-FROM node:18
+# Imagen base ligera
+FROM node:18-slim
 
-# Crear directorio de trabajo
+# Asegura zona y entorno prod
+ENV NODE_ENV=production
+ENV PORT=8080
+
+# Directorio de trabajo
 WORKDIR /usr/src/app
 
-# Copiar archivos
+# Instala deps primero (mejor cache)
 COPY package*.json ./
-RUN npm install
+RUN npm ci --omit=dev
+
+# Copia código
 COPY . .
 
-# Exponer puerto 8080 y ejecutar app
+# Expone puerto
 EXPOSE 8080
+
+# Levanta la app
 CMD ["npm", "start"]
