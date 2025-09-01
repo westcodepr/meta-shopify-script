@@ -2,15 +2,20 @@
   "name": "meta-shopify-script",
   "version": "1.0.0",
   "description": "Script de extracción para Meta Ads y Shopify",
+  "type": "commonjs",
   "main": "index.js",
   "scripts": {
-    "start": "node index.js"
+    "start": "node index.js",
+    "health": "node -e \"require('http').createServer((_,r)=>r.end('ok')).listen(process.env.PORT||8080,'0.0.0.0')\""
+  },
+  "engines": {
+    "node": ">=18"
   },
   "dependencies": {
-    "axios": "^1.6.7",
     "dotenv": "^16.3.1",
     "express": "^4.18.2",
     "googleapis": "^133.0.0",
+    "node-fetch": "^2.6.7",
     "p-limit": "^6.2.0"
   }
 }
