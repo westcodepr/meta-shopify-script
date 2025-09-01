@@ -181,16 +181,16 @@ async function run(mode) {
         const updatedMax = createdMax;
 
         let orders = [];
-        let totalSalesPositives = 0;   // suma de total_price por fecha de venta
+        let totalSalesPositives = 0;   // suma de total_price por fecha de venta (created_at)
         let totalRefundsInRange = 0;   // refunds por fecha de processed_at
         let shopifyError = false;
         let shopifyErrorMsg = 'ERROR API (Shopify)';
 
         // ---- Pasada A: pedidos creados en el rango (ventas positivas) ----
+        // (No restamos refunds aquí para evitar doble descuento)
         let pageUrl = `${shopUrl}/admin/api/${version}/orders.json?` +
                       `created_at_min=${encodeURIComponent(createdMin)}&created_at_max=${encodeURIComponent(createdMax)}` +
-                      `&status=any&limit=250&fields=id,total_price,refunds`;
-
+                      `&status=any&limit=250`;
         try {
           while (pageUrl) {
             const response = await fetch(pageUrl, {
@@ -215,31 +215,6 @@ async function run(mode) {
               }
               totalSalesPositives += total;
               orders.push(order);
-
-              if (Array.isArray(order.refunds)) {
-                for (const r of order.refunds) {
-                  const processedAt = r.processed_at ? new Date(r.processed_at) : null;
-                  if (!processedAt) continue;
-                  const ts = processedAt.getTime();
-                  const inRange =
-                    ts >= new Date(createdMin).getTime() &&
-                    ts <= new Date(createdMax).getTime();
-                  if (inRange && Array.isArray(r.transactions)) {
-                    for (const t of r.transactions) {
-                      if ((t.kind === 'refund' || t.kind === 'sale_refund') && t.status === 'success') {
-                        const amt = Math.abs(parseFloat(t.amount ?? "0"));
-                        if (isNaN(amt)) {
-                          shopifyError = true;
-                          shopifyErrorMsg = 'ERROR API (Shopify parse refund)';
-                          break;
-                        }
-                        totalRefundsInRange += amt;
-                      }
-                    }
-                  }
-                }
-              }
-              if (shopifyError) break;
             }
             if (shopifyError) break;
 
@@ -257,11 +232,11 @@ async function run(mode) {
           console.log(`⚠️ Shopify (ventas) error: ${e.message}`);
         }
 
-        // ---- Pasada B: pedidos actualizados en el rango (refunds de pedidos antiguos) ----
+        // ---- Pasada B: pedidos actualizados en el rango (refunds por processed_at) ----
         if (!shopifyError) {
           let updatedUrl = `${shopUrl}/admin/api/${version}/orders.json?` +
                            `updated_at_min=${encodeURIComponent(updatedMin)}&updated_at_max=${encodeURIComponent(updatedMax)}` +
-                           `&status=any&limit=250&fields=id,refunds`;
+                           `&status=any&limit=250`;
           try {
             while (updatedUrl) {
               const response = await fetch(updatedUrl, {
@@ -278,9 +253,8 @@ async function run(mode) {
               const data = json.orders || [];
 
               for (const order of data) {
-                if (!Array.isArray(order.refunds)) continue;
-
-                for (const r of order.refunds) {
+                const refunds = Array.isArray(order.refunds) ? order.refunds : [];
+                for (const r of refunds) {
                   const processedAt = r.processed_at ? new Date(r.processed_at) : null;
                   if (!processedAt) continue;
 
@@ -288,22 +262,24 @@ async function run(mode) {
                   const inRange =
                     ts >= new Date(updatedMin).getTime() &&
                     ts <= new Date(updatedMax).getTime();
+                  if (!inRange) continue;
 
-                  if (inRange && Array.isArray(r.transactions)) {
+                  // Preferimos transactions (incluyen impuestos+shipping).
+                  let refundAmount = 0;
+                  if (Array.isArray(r.transactions) && r.transactions.length) {
                     for (const t of r.transactions) {
                       if ((t.kind === 'refund' || t.kind === 'sale_refund') && t.status === 'success') {
                         const amt = Math.abs(parseFloat(t.amount ?? "0"));
-                        if (isNaN(amt)) {
-                          shopifyError = true;
-                          shopifyErrorMsg = 'ERROR API (Shopify parse refund B)';
-                          break;
-                        }
-                        totalRefundsInRange += amt;
+                        if (!isNaN(amt)) refundAmount += amt;
                       }
                     }
+                  } else if (r.amount != null) {
+                    // Fallback por si Shopify provee un monto agregado.
+                    const amt = Math.abs(parseFloat(r.amount));
+                    if (!isNaN(amt)) refundAmount += amt;
                   }
+                  totalRefundsInRange += refundAmount;
                 }
-                if (shopifyError) break;
               }
 
               if (shopifyError) break;
