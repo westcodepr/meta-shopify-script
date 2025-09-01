@@ -117,25 +117,22 @@ async function getShopTimeZone(shopUrl, version, token) {
   }
 }
 
-// ---------- Cálculo robusto de refunds (solo items+tax) ----------
+// ---------- Cálculo de refunds: INCLUYE shipping (delivery) ----------
 function refundItemsAmount(refund) {
-  let items = 0;
-
-  // (A) Preferimos transactions; restamos shipping si viene en refund.shipping.amount
+  // (A) Preferimos transactions: suma total de reembolsos (items + tax + shipping)
   if (Array.isArray(refund.transactions) && refund.transactions.length) {
-    let tx = 0;
+    let total = 0;
     for (const t of refund.transactions) {
       if ((t.kind === 'refund' || t.kind === 'sale_refund') && t.status === 'success') {
         const amt = Math.abs(parseFloat(t.amount ?? '0'));
-        if (!isNaN(amt)) tx += amt;
+        if (!isNaN(amt)) total += amt;
       }
     }
-    const ship = refund?.shipping?.amount ? Math.abs(parseFloat(refund.shipping.amount) || 0) : 0;
-    items += Math.max(0, tx - ship);
-    if (items > 0) return items; // suficiente
+    if (total > 0) return total;
   }
 
   // (B) Fallback: refund_line_items (subtotal + total_tax)
+  let items = 0;
   if (Array.isArray(refund.refund_line_items) && refund.refund_line_items.length) {
     for (const rli of refund.refund_line_items) {
       const subtotal = parseFloat(rli.subtotal ?? rli.subtotal_set?.shop_money?.amount ?? '0') || 0;
@@ -148,9 +145,9 @@ function refundItemsAmount(refund) {
   // (C) Último recurso: amount (si lo hay)
   if (refund.amount != null) {
     const amt = Math.abs(parseFloat(refund.amount) || 0);
-    items += amt;
+    return amt;
   }
-  return items;
+  return 0;
 }
 
 async function run(mode) {
@@ -255,7 +252,7 @@ async function run(mode) {
 
         let orders = [];
         let totalSalesPositives = 0; // sum(total_price) de pedidos creados
-        let totalRefundsItems = 0;   // solo items+tax (sin shipping)
+        let totalRefundsItems = 0;   // ahora incluye items+tax+shipping
         let shopifyError = false;
         let shopifyErrorMsg = 'ERROR API (Shopify)';
 
@@ -284,7 +281,7 @@ async function run(mode) {
           }
         } catch (e) { shopifyError = true; shopifyErrorMsg = 'ERROR API (Shopify fetch ventas)'; }
 
-        // (B) Returns por processed_at (excluyendo shipping)
+        // (B) Returns por processed_at (incluye shipping)
         if (!shopifyError) {
           let updatedUrl = `${shopUrl}/admin/api/${version}/orders.json?` +
                            `updated_at_min=${encodeURIComponent(updatedMin)}&updated_at_max=${encodeURIComponent(updatedMax)}` +
@@ -305,8 +302,8 @@ async function run(mode) {
                   const inRange = ts >= new Date(updatedMin).getTime() && ts <= new Date(updatedMax).getTime();
                   if (!inRange) continue;
 
-                  const itemsAmount = refundItemsAmount(r);
-                  totalRefundsItems += itemsAmount;
+                  const amount = refundItemsAmount(r); // ahora incluye shipping si está en transactions/amount
+                  totalRefundsItems += amount;
                 }
               }
 
@@ -333,7 +330,7 @@ async function run(mode) {
           });
         } else {
           const totalSales = Math.round((totalSalesPositives - totalRefundsItems) * 100) / 100;
-          console.log(`[${period}] tz=${shopTimeZone} off=${createdStart.offset} ventas=${totalSalesPositives.toFixed(2)} returns_items=${totalRefundsItems.toFixed(2)} total=${totalSales.toFixed(2)}`);
+          console.log(`[${period}] tz=${shopTimeZone} off=${createdStart.offset} ventas=${totalSalesPositives.toFixed(2)} refunds_total=${totalRefundsItems.toFixed(2)} total=${totalSales.toFixed(2)}`);
           await sheets.spreadsheets.values.batchUpdate({
             spreadsheetId: sheetId,
             requestBody: {
