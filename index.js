@@ -281,4 +281,118 @@ async function run(mode) {
                 if (!Array.isArray(order.refunds)) continue;
 
                 for (const r of order.refunds) {
-                  const processedAt = r.processed_at_
+                  const processedAt = r.processed_at ? new Date(r.processed_at) : null;
+                  if (!processedAt) continue;
+
+                  const ts = processedAt.getTime();
+                  const inRange =
+                    ts >= new Date(updatedMin).getTime() &&
+                    ts <= new Date(updatedMax).getTime();
+
+                  if (inRange && Array.isArray(r.transactions)) {
+                    for (const t of r.transactions) {
+                      if ((t.kind === 'refund' || t.kind === 'sale_refund') && t.status === 'success') {
+                        const amt = Math.abs(parseFloat(t.amount ?? "0"));
+                        if (isNaN(amt)) {
+                          shopifyError = true;
+                          shopifyErrorMsg = 'ERROR API (Shopify parse refund B)';
+                          break;
+                        }
+                        totalRefundsInRange += amt;
+                      }
+                    }
+                  }
+                }
+                if (shopifyError) break;
+              }
+
+              if (shopifyError) break;
+
+              const linkHeader = response.headers.get('link');
+              if (linkHeader && linkHeader.includes('rel="next"')) {
+                const match = linkHeader.match(/<([^>]+)>\;\s*rel="next"/);
+                updatedUrl = match ? match[1] : null;
+              } else {
+                updatedUrl = null;
+              }
+            }
+          } catch (e) {
+            shopifyError = true;
+            shopifyErrorMsg = 'ERROR API (Shopify fetch refunds)';
+            console.log(`⚠️ Shopify (refunds) error: ${e.message}`);
+          }
+        }
+
+        // ---- Escribir resultado / o marcador de error ----
+        if (shopifyError) {
+          await sheets.spreadsheets.values.batchUpdate({
+            spreadsheetId: sheetId,
+            requestBody: {
+              data: [
+                { range: `${sheetName}!${getColumnLetter(col)}${shopifyRows.sales[period]}`,  values: [[shopifyErrorMsg]] },
+                { range: `${sheetName}!${getColumnLetter(col)}${shopifyRows.orders[period]}`, values: [[shopifyErrorMsg]] }
+              ],
+              valueInputOption: 'RAW'
+            }
+          });
+        } else {
+          const totalSales = Math.round((totalSalesPositives - totalRefundsInRange) * 100) / 100;
+          await sheets.spreadsheets.values.batchUpdate({
+            spreadsheetId: sheetId,
+            requestBody: {
+              data: [
+                { range: `${sheetName}!${getColumnLetter(col)}${shopifyRows.sales[period]}`,  values: [[totalSales]] },
+                { range: `${sheetName}!${getColumnLetter(col)}${shopifyRows.orders[period]}`, values: [[orders.length]] }
+              ],
+              valueInputOption: 'RAW'
+            }
+          });
+        }
+      } else {
+        // credenciales faltantes de Shopify: marcamos error explícito
+        const salesRow = shopifyRows.sales[period];
+        const ordersRow = shopifyRows.orders[period];
+        await sheets.spreadsheets.values.batchUpdate({
+          spreadsheetId: sheetId,
+          requestBody: {
+            data: [
+              { range: `${sheetName}!${getColumnLetter(col)}${salesRow}`,  values: [['ERROR API (Shopify creds)']] },
+              { range: `${sheetName}!${getColumnLetter(col)}${ordersRow}`, values: [['ERROR API (Shopify creds)']] }
+            ],
+            valueInputOption: 'RAW'
+          }
+        });
+      }
+    }
+
+    const delay = randomDelay();
+    console.log(`⏳ Esperando ${delay / 1000} segundos antes de continuar con la próxima columna...`);
+    await sleep(delay);
+  }
+
+  console.log("✅ Script ejecutado correctamente.");
+}
+
+// Health endpoint para readiness/liveness
+app.get('/healthz', (_req, res) => res.status(200).send('ok'));
+
+// Endpoint de ejecución manual
+app.get('/', async (req, res) => {
+  try {
+    const mode = req.query.mode || 'current';
+    await run(mode);
+    res.send(`✅ Script ejecutado correctamente con mode=${mode}`);
+  } catch (err) {
+    console.error(err);
+    res.status(500).send(`
+      ❌ Hubo un error al ejecutar el script.<br><br>
+      <pre>${err.message}</pre>
+      <pre>${err.stack}</pre>
+    `);
+  }
+});
+
+// Bind en 0.0.0.0 para Cloud Run
+app.listen(port, '0.0.0.0', () => {
+  console.log(`🟢 Servidor escuchando en el puerto ${port}`);
+});
