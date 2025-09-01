@@ -129,20 +129,36 @@ async function run(mode) {
     for (const period of periods) {
       const { since, until } = getDateRange(period);
 
-      // Meta Ads
+      // ---------------- Meta Ads (con marcadores de error) ----------------
       if (metaToken && campaignIdRaw) {
         const campaignIds = campaignIdRaw.split(',').map(id => id.trim());
         let totalSpend = 0;
+        let metaError = false;
+        let metaErrorMsg = 'ERROR API (Meta)';
 
         for (const campaignId of campaignIds) {
           const url = `https://graph.facebook.com/v19.0/${campaignId}/insights?fields=spend&access_token=${metaToken}&time_range[since]=${since}&time_range[until]=${until}&level=campaign&attribution_setting=7d_click_1d_view`;
           try {
             const response = await fetch(url);
+            if (!response.ok) {
+              metaError = true;
+              metaErrorMsg = `ERROR API (Meta ${response.status})`;
+              console.log(`⚠️ Meta Ads HTTP ${response.status} for campaign ${campaignId}`);
+              break;
+            }
             const json = await response.json();
-            const spend = parseFloat(json?.data?.[0]?.spend || "0.00");
+            const spend = parseFloat(json?.data?.[0]?.spend || "0");
+            if (isNaN(spend)) {
+              metaError = true;
+              metaErrorMsg = `ERROR API (Meta parse)`;
+              break;
+            }
             totalSpend += spend;
           } catch (e) {
+            metaError = true;
+            metaErrorMsg = `ERROR API (Meta fetch)`;
             console.log(`⚠️ Meta Ads error on campaign ${campaignId}: ${e.message}`);
+            break;
           }
         }
 
@@ -150,15 +166,30 @@ async function run(mode) {
           spreadsheetId: sheetId,
           range: `${sheetName}!${getColumnLetter(col)}${metaRows[period]}`,
           valueInputOption: 'RAW',
-          requestBody: { values: [[Math.round(totalSpend * 100) / 100]] },
+          requestBody: {
+            values: [[ metaError ? metaErrorMsg : Math.round(totalSpend * 100) / 100 ]]
+          },
         });
       }
 
-      // Shopify
+      // ---------------- Shopify (Total sales + marcadores de error) ----------------
       if (shopifyToken && shopUrl && version) {
+        const tz = "-04:00";
+        const createdMin = `${since}T00:00:00${tz}`;
+        const createdMax = `${until}T23:59:59${tz}`;
+        const updatedMin = createdMin;
+        const updatedMax = createdMax;
+
         let orders = [];
-        let totalSales = 0;
-        let pageUrl = `${shopUrl}/admin/api/${version}/orders.json?created_at_min=${since}T00:00:00-04:00&created_at_max=${until}T23:59:59-04:00&status=any&limit=250`;
+        let totalSalesPositives = 0;   // suma de total_price por fecha de venta
+        let totalRefundsInRange = 0;   // refunds por fecha de processed_at
+        let shopifyError = false;
+        let shopifyErrorMsg = 'ERROR API (Shopify)';
+
+        // ---- Pasada A: pedidos creados en el rango (ventas positivas) ----
+        let pageUrl = `${shopUrl}/admin/api/${version}/orders.json?` +
+                      `created_at_min=${encodeURIComponent(createdMin)}&created_at_max=${encodeURIComponent(createdMax)}` +
+                      `&status=any&limit=250&fields=id,total_price,refunds`;
 
         try {
           while (pageUrl) {
@@ -166,72 +197,88 @@ async function run(mode) {
               method: 'GET',
               headers: { 'X-Shopify-Access-Token': shopifyToken }
             });
+            if (!response.ok) {
+              shopifyError = true;
+              shopifyErrorMsg = `ERROR API (Shopify ${response.status})`;
+              console.log(`⚠️ Shopify HTTP ${response.status} en ventas`);
+              break;
+            }
             const json = await response.json();
             const data = json.orders || [];
 
             for (const order of data) {
-              for (const item of order.line_items || []) {
-                const price = parseFloat(item.price || 0);
-                const quantity = parseInt(item.quantity || 1);
-                totalSales += price * quantity;
+              const total = parseFloat(order.total_price ?? "0");
+              if (isNaN(total)) {
+                shopifyError = true;
+                shopifyErrorMsg = 'ERROR API (Shopify parse total_price)';
+                break;
               }
+              totalSalesPositives += total;
               orders.push(order);
+
+              if (Array.isArray(order.refunds)) {
+                for (const r of order.refunds) {
+                  const processedAt = r.processed_at ? new Date(r.processed_at) : null;
+                  if (!processedAt) continue;
+                  const ts = processedAt.getTime();
+                  const inRange =
+                    ts >= new Date(createdMin).getTime() &&
+                    ts <= new Date(createdMax).getTime();
+                  if (inRange && Array.isArray(r.transactions)) {
+                    for (const t of r.transactions) {
+                      if ((t.kind === 'refund' || t.kind === 'sale_refund') && t.status === 'success') {
+                        const amt = Math.abs(parseFloat(t.amount ?? "0"));
+                        if (isNaN(amt)) {
+                          shopifyError = true;
+                          shopifyErrorMsg = 'ERROR API (Shopify parse refund)';
+                          break;
+                        }
+                        totalRefundsInRange += amt;
+                      }
+                    }
+                  }
+                }
+              }
+              if (shopifyError) break;
             }
+            if (shopifyError) break;
 
             const linkHeader = response.headers.get('link');
             if (linkHeader && linkHeader.includes('rel="next"')) {
-              const match = linkHeader.match(/<([^>]+)>;\s*rel="next"/); // ← CORREGIDO AQUÍ
+              const match = linkHeader.match(/<([^>]+)>\;\s*rel="next"/);
               pageUrl = match ? match[1] : null;
             } else {
               pageUrl = null;
             }
           }
-
-          await sheets.spreadsheets.values.batchUpdate({
-            spreadsheetId: sheetId,
-            requestBody: {
-              data: [
-                {
-                  range: `${sheetName}!${getColumnLetter(col)}${shopifyRows.sales[period]}`,
-                  values: [[Math.round(totalSales * 100) / 100]]
-                },
-                {
-                  range: `${sheetName}!${getColumnLetter(col)}${shopifyRows.orders[period]}`,
-                  values: [[orders.length]]
-                }
-              ],
-              valueInputOption: 'RAW'
-            }
-          });
         } catch (e) {
-          console.log(`⚠️ Shopify error: ${e.message}`);
+          shopifyError = true;
+          shopifyErrorMsg = 'ERROR API (Shopify fetch ventas)';
+          console.log(`⚠️ Shopify (ventas) error: ${e.message}`);
         }
-      }
-    }
 
-    const delay = randomDelay();
-    console.log(`⏳ Esperando ${delay / 1000} segundos antes de continuar con la próxima columna...`);
-    await sleep(delay);
-  }
+        // ---- Pasada B: pedidos actualizados en el rango (refunds de pedidos antiguos) ----
+        if (!shopifyError) {
+          let updatedUrl = `${shopUrl}/admin/api/${version}/orders.json?` +
+                           `updated_at_min=${encodeURIComponent(updatedMin)}&updated_at_max=${encodeURIComponent(updatedMax)}` +
+                           `&status=any&limit=250&fields=id,refunds`;
+          try {
+            while (updatedUrl) {
+              const response = await fetch(updatedUrl, {
+                method: 'GET',
+                headers: { 'X-Shopify-Access-Token': shopifyToken }
+              });
+              if (!response.ok) {
+                shopifyError = true;
+                shopifyErrorMsg = `ERROR API (Shopify ${response.status} refunds)`;
+                console.log(`⚠️ Shopify HTTP ${response.status} en refunds`);
+                break;
+              }
+              const json = await response.json();
+              const data = json.orders || [];
 
-  console.log("✅ Script ejecutado correctamente.");
-}
+              for (const order of data) {
+                if (!Array.isArray(order.refunds)) continue;
 
-app.get('/', async (req, res) => {
-  try {
-    const mode = req.query.mode || 'current';
-    await run(mode);
-    res.send(`✅ Script ejecutado correctamente con mode=${mode}`);
-  } catch (err) {
-    console.error(err);
-    res.status(500).send(`
-      ❌ Hubo un error al ejecutar el script.<br><br>
-      <pre>${err.message}</pre>
-      <pre>${err.stack}</pre>
-    `);
-  }
-});
-
-app.listen(port, () => {
-  console.log(`🟢 Servidor escuchando en el puerto ${port}`);
-});
+                for (const r of order.refunds) {
+                  const processedAt = r.processed_at_
